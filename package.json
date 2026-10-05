@@ -1,0 +1,8 @@
+{
+  "name": "haydioyna",
+  "private": true,
+  "scripts": {
+    "build": "npx -y esbuild@0.24 js/app.js --bundle --format=iife --target=es2020 --external:'https://*' --outfile=js/haydioyna.bundle.js",
+    "start": "python3 -m http.server 8765"
+  }
+}
