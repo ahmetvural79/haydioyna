@@ -78,6 +78,18 @@ button { font: inherit; cursor: pointer; color: inherit; }
 .round-btn { width: 56px; height: 56px; border-radius: 50%; border: 0; background: #fff; font-size: 24px; box-shadow: 0 5px 0 rgba(18,33,59,0.15); transition: transform .12s; }
 .round-btn:hover { transform: translateY(-2px); }
 .round-btn.on { background: var(--green); }
+/* kamera / fare seçici: kamera = beyaz zemin mavi kamera, fare = turuncu zemin beyaz fare */
+.mode-btn { position: relative; display: grid; place-items: center; color: #fff; transition: transform .12s, background .2s, box-shadow .2s; }
+.mode-btn svg { width: 28px; height: 28px; grid-area: 1 / 1; transition: opacity .2s, transform .25s cubic-bezier(.2,1.4,.4,1); }
+.mode-btn .ic-cam { fill: var(--blue); }
+.mode-btn .ic-mouse { fill: #fff; opacity: 0; transform: scale(.4) rotate(-30deg); }
+.mode-btn.mouse { background: linear-gradient(180deg, #FFC548, #FF9F1C); box-shadow: 0 5px 0 #D97A00, 0 0 0 4px rgba(255,255,255,0.7); }
+.mode-btn.mouse .ic-cam { opacity: 0; transform: scale(.4) rotate(30deg); }
+.mode-btn.mouse .ic-mouse { opacity: 1; transform: none; }
+.mode-btn .mode-dot { position: absolute; right: 3px; top: 3px; width: 13px; height: 13px; border-radius: 50%; background: #CBD5E1; border: 2px solid #fff; transition: background .2s; }
+.mode-btn.live .mode-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(34,195,142,0.3); }
+.mode-btn.busy .mode-dot { background: var(--yellow); animation: blink 1s infinite; }
+.mode-btn.mouse .mode-dot { display: none; }
 
 /* ---------- ana sayfa ---------- */
 .page { position: relative; z-index: 2; max-width: 1400px; margin: 0 auto; padding: 8px 24px 40px; }
@@ -245,7 +257,7 @@ button { font: inherit; cursor: pointer; color: inherit; }
 
 /* el imleçleri */
 .hand-layer { position: fixed; inset: 0; pointer-events: none; z-index: 100; }
-.hand-cursor { position: absolute; left: -45px; top: -45px; width: 90px; height: 90px; filter: drop-shadow(0 6px 6px rgba(0,0,0,0.25)); will-change: transform; }
+.hand-cursor { position: absolute; left: -31px; top: -31px; width: 62px; height: 62px; filter: drop-shadow(0 4px 4px rgba(0,0,0,0.22)); will-change: transform; }
 
 body.playing .topbar, body.playing .sky { display: none; }
 

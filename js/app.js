@@ -40,6 +40,7 @@ const store = {
 const state = {
   players: store.get('ho-players', 1),
   difficulty: store.get('ho-diff', 'orta'),
+  input: store.get('ho-input', 'camera'), // 'camera' | 'mouse': oyunlar hangi kontrolle açılır
   tracker: null,
   cameraBusy: false,
   session: null,
@@ -118,6 +119,7 @@ async function ensureCamera(statusEl) {
   if (state.tracker && state.tracker.running && state.tracker.landmarker) return true;
   if (state.cameraBusy) return false;
   state.cameraBusy = true;
+  updateCamButtons();
   const setStatus = (s) => { if (statusEl) statusEl.textContent = s; };
   try {
     if (!state.tracker) state.tracker = new PoseTracker();
@@ -148,7 +150,13 @@ function updateCamButtons() {
   $('#startCam').textContent = on ? '⏹ Kamerayı kapat' : '📷 Kamerayı aç';
   $('#startCam').classList.toggle('on-cam', on);
   $('#startCam').classList.toggle('green', !on);
-  $('#camBtn').classList.toggle('on', on);
+  const mb = $('#camBtn');
+  const mouse = state.input === 'mouse';
+  mb.classList.toggle('mouse', mouse);
+  mb.classList.toggle('live', !mouse && on && !state.cameraBusy);
+  mb.classList.toggle('busy', !mouse && state.cameraBusy);
+  mb.title = mouse ? 'Fare modu: kameraya geçmek için bas' : on ? 'Kamera modu: fareye geçmek için bas' : 'Kamera modu (kapalı): açmak için bas';
+  $('#mouseMode').classList.toggle('on-mouse', mouse);
   $('#marqueeText').textContent = on
     ? '✋ Elini kaldır, bir kartın üstünde tut, daire dolunca oyun açılır! ⭐'
     : '✨ 📷 Kamerayı aç, sonra her şeyi ellerinle yönet! ⭐';
@@ -162,7 +170,13 @@ function camErrorText(e) {
 }
 
 // ---------- oyun akışı ----------
-function openGame(id, mouse = false) {
+function setInput(mode) {
+  state.input = mode;
+  store.set('ho-input', mode);
+  updateCamButtons();
+}
+
+function openGame(id, mouse = state.input === 'mouse') {
   sfx.unlock();
   location.hash = `#/oyna/${id}/${mouse ? 'fare' : state.players}`;
 }
@@ -515,7 +529,7 @@ function stopPlay() {
   $('#home').hidden = false;
   document.body.classList.remove('playing');
   if ('speechSynthesis' in window) speechSynthesis.cancel();
-  if (state.tracker) state.tracker.setMode(2);
+  if (state.tracker) state.tracker.setMode(state.players);
 }
 
 // ---------- bilgi sayfaları ----------
@@ -573,6 +587,7 @@ function updateChips() {
 // ---------- ana döngü ----------
 let lastT = performance.now();
 let chipT = 0;
+let frameN = 0;
 function mainLoop(now) {
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -583,7 +598,9 @@ function mainLoop(now) {
   const inGame = state.session && (state.session.phase === 'count' || state.session.phase === 'play');
   hands.enabled = !inGame;
   hands.update(tr, dt);
-  if (!playing) {
+  frameN++;
+  // kamera açıkken kart önizlemeleri 30 kare/sn: işlemci el takibine kalsın
+  if (!playing && !(tr && tr.running && frameN % 2)) {
     thumbs.forEach(({ canvas, game }) => {
       const S = sizeCanvas(canvas);
       if (!S) return;
@@ -613,27 +630,26 @@ function init() {
 
   document.querySelectorAll('[data-players]').forEach((b) => b.addEventListener('click', () => {
     state.players = Number(b.dataset.players); store.set('ho-players', state.players); syncSegs(); sfx.tap(state.players);
+    if (state.tracker && $('#play').hidden) state.tracker.setMode(state.players);
   }));
   document.querySelectorAll('[data-diff]').forEach((b) => b.addEventListener('click', () => {
     state.difficulty = b.dataset.diff; store.set('ho-diff', state.difficulty); syncSegs(); sfx.tap(2);
   }));
-  const camToggle = async () => {
+  const camOn = async () => {
     sfx.unlock();
-    if (state.tracker && state.tracker.running) return stopCamera();
-    try { await ensureCamera($('#marqueeText')); state.tracker.setMode(2); say('Elini kaldır ve bir oyun seç!'); }
+    setInput('camera');
+    try { await ensureCamera($('#marqueeText')); state.tracker.setMode(state.players); updateCamButtons(); say('Elini kaldır ve bir oyun seç!'); }
     catch (e) { $('#marqueeText').textContent = '😿 ' + camErrorText(e); }
   };
-  $('#startCam').addEventListener('click', camToggle);
-  $('#camBtn').addEventListener('click', camToggle);
-  $('#mouseMode').addEventListener('click', () => {
+  const mouseOn = () => {
+    stopCamera();
+    setInput('mouse');
     $('#marqueeText').textContent = '🖱️ Fare modu: bir oyunun ▶ OYNA düğmesine bas!';
-    state.mouseNext = true;
-    document.querySelectorAll('.play-btn').forEach((b) => b.classList.add('pulse'));
-  });
-  // "Kamerasız dene" seçildiyse sonraki oyun fare modunda açılır
-  document.querySelectorAll('.play-btn').forEach((b, i) => b.addEventListener('click', (e) => {
-    if (state.mouseNext) { e.stopImmediatePropagation(); state.mouseNext = false; openGame(GAMES[i].id, true); }
-  }, true));
+  };
+  $('#startCam').addEventListener('click', () => (state.tracker && state.tracker.running ? stopCamera() : camOn()));
+  // sağ üstteki seçici: kamera ⇄ fare
+  $('#camBtn').addEventListener('click', () => (state.input === 'mouse' ? camOn() : mouseOn()));
+  $('#mouseMode').addEventListener('click', mouseOn);
   $('#privacyPill').addEventListener('click', () => { location.hash = '#/gizlilik'; });
   document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => { location.hash = '#/'; }));
   $('#info').addEventListener('click', (e) => { if (e.target.id === 'info') location.hash = '#/'; });
@@ -643,7 +659,7 @@ function init() {
   $('#homeBtn').addEventListener('click', () => { location.hash = '#/'; });
   $('#againBtn').addEventListener('click', () => { $('#endScreen').hidden = true; shownScores[0] = shownScores[1] = 0; buildScoreCards(state.current.players); newSession(); });
   $('#retryBtn').addEventListener('click', () => { const { game, players } = state.current; startPlay(game.id, String(players)); });
-  $('#mouseBtn').addEventListener('click', () => { location.hash = `#/oyna/${state.current.game.id}/fare`; });
+  $('#mouseBtn').addEventListener('click', () => { setInput('mouse'); location.hash = `#/oyna/${state.current.game.id}/fare`; });
   $('#mirrorToggle').addEventListener('click', () => {
     $('#mirror').classList.toggle('min');
     $('#mirrorToggle').textContent = $('#mirror').classList.contains('min') ? '▴' : '▾';

@@ -762,11 +762,14 @@
       this.video.muted = true;
       this.stream = null;
       this.landmarker = null;
-      this.numPoses = 2;
       this.mode = 1;
       this.lastVideoTime = -1;
+      this.frameId = 0;
       this.poses = [];
+      this.targets = [null, null];
       this.slots = [null, null];
+      this._lastNow = 0;
+      this._optsBusy = null;
       this.lastSeen = [0, 0];
       this.fps = 0;
       this._fpsT = 0;
@@ -774,7 +777,8 @@
     }
     async startCamera() {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        // model girişi zaten 256 px; büyük kare yalnızca GPU'ya kopyalamayı yavaşlatır
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } },
         audio: false
       });
       this.video.srcObject = this.stream;
@@ -786,7 +790,7 @@
     }
     async loadModel(onStatus = () => {
     }) {
-      const numPoses = this.numPoses;
+      const numPoses = this.mode === 1 ? 1 : 2;
       onStatus("Hareket alg\u0131lay\u0131c\u0131 indiriliyor\u2026");
       const vision = await import(VISION_URL);
       const fileset = await vision.FilesetResolver.forVisionTasks(WASM_URL);
@@ -806,25 +810,55 @@
       }
       onStatus("Haz\u0131r!");
     }
-    // Her karede çağrılır; yeni kamera karesi varsa algılar
+    // Her ekran karesinde çağrılır: yeni kamera karesi varsa algılar, sonra pozları akıcı biçimde hedefe taşır
     detect(now) {
-      if (!this.landmarker || this.video.readyState < 2) return;
-      if (this.video.currentTime === this.lastVideoTime) return;
-      this.lastVideoTime = this.video.currentTime;
-      let res;
-      try {
-        res = this.landmarker.detectForVideo(this.video, now);
-      } catch (e) {
-        console.warn(e);
-        return;
+      const dt = this._lastNow ? Math.min(0.1, (now - this._lastNow) / 1e3) : 0.016;
+      if (now === this._lastNow) return;
+      this._lastNow = now;
+      if (this.landmarker && !this._optsBusy && this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime) {
+        this.lastVideoTime = this.video.currentTime;
+        let res = null;
+        try {
+          res = this.landmarker.detectForVideo(this.video, now);
+        } catch (e) {
+          console.warn(e);
+        }
+        if (res) {
+          this.poses = (res.landmarks || []).map((lm) => lm.map((p) => ({ x: 1 - p.x, y: p.y, v: p.visibility ?? 1 })));
+          this._assign(now);
+          this.frameId++;
+          this._fpsN++;
+          if (now - this._fpsT > 1e3) {
+            this.fps = this._fpsN;
+            this._fpsN = 0;
+            this._fpsT = now;
+          }
+        }
       }
-      this.poses = (res.landmarks || []).map((lm) => lm.map((p) => ({ x: 1 - p.x, y: p.y, v: p.visibility ?? 1 })));
-      this._assign(now);
-      this._fpsN++;
-      if (now - this._fpsT > 1e3) {
-        this.fps = this._fpsN;
-        this._fpsN = 0;
-        this._fpsT = now;
+      this._follow(dt);
+    }
+    // Kamera ~30 kare/sn, ekran 60+ kare/sn: aradaki karelerde noktaları hedefe kaydırarak titremesiz ve
+    // kesiksiz hareket. Küçük oynamalar (gürültü) yavaş, hızlı el hareketleri neredeyse anında izlenir.
+    _follow(dt) {
+      for (let i = 0; i < 2; i++) {
+        const t = this.targets[i], s = this.slots[i];
+        if (!t) {
+          this.slots[i] = null;
+          continue;
+        }
+        if (!s) {
+          this.slots[i] = t.map((p) => ({ ...p }));
+          continue;
+        }
+        for (let j = 0; j < t.length; j++) {
+          const a = s[j], b = t[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const rate = Math.min(60, 14 + Math.hypot(dx, dy) * 900);
+          const k = 1 - Math.exp(-dt * rate);
+          a.x += dx * k;
+          a.y += dy * k;
+          a.v = b.v;
+        }
       }
     }
     _assign(now) {
@@ -849,29 +883,22 @@
         } else if (sorted.length === 1) targets[center(sorted[0]) < 0.5 ? 0 : 1] = sorted[0];
       }
       for (let i = 0; i < 2; i++) {
-        const t = targets[i];
-        if (!t) {
-          if (now - this.lastSeen[i] > 400) this.slots[i] = null;
-          continue;
-        }
-        this.lastSeen[i] = now;
-        const prev = this.slots[i];
-        if (!prev) {
-          this.slots[i] = t.map((p) => ({ ...p }));
-          continue;
-        }
-        const k = 0.55;
-        this.slots[i] = t.map((p, j) => ({
-          x: prev[j].x + (p.x - prev[j].x) * k,
-          y: prev[j].y + (p.y - prev[j].y) * k,
-          v: p.v
-        }));
+        if (targets[i]) {
+          this.lastSeen[i] = now;
+          this.targets[i] = targets[i];
+        } else if (now - this.lastSeen[i] > 400) this.targets[i] = null;
       }
     }
     setMode(m) {
-      if (this.mode !== m) {
-        this.mode = m;
-        this.slots = [null, null];
+      if (this.mode === m) return;
+      this.mode = m;
+      this.targets = [null, null];
+      this.slots = [null, null];
+      if (this.landmarker && this.landmarker.setOptions) {
+        const lm = this.landmarker;
+        const p = this._optsBusy = lm.setOptions({ numPoses: m === 1 ? 1 : 2 }).catch((e) => console.warn(e)).finally(() => {
+          if (this._optsBusy === p) this._optsBusy = null;
+        });
       }
     }
     get running() {
@@ -1039,7 +1066,8 @@
       this.inputs = [new InputState(), new InputState()];
       this.lastInputs = [];
       this.mirror = document.createElement("canvas");
-      this.mctx = this.mirror.getContext("2d");
+      this.mctx = this.mirror.getContext("2d", { alpha: false });
+      this.mirrorFrame = -1;
       this.running = false;
       this._bind();
       this.resize();
@@ -1077,7 +1105,7 @@
       window.addEventListener("keyup", this._onKey);
     }
     resize() {
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const dpr = Math.min(this.tracker ? 1.5 : 2, window.devicePixelRatio || 1);
       const W = this.canvas.clientWidth || 800, H = this.canvas.clientHeight || 600;
       this.canvas.width = Math.round(W * dpr);
       this.canvas.height = Math.round(H * dpr);
@@ -1179,7 +1207,8 @@
           this.mirror.width = vid.videoWidth;
           this.mirror.height = vid.videoHeight;
         }
-        if (vid.readyState >= 2 && this.mirror.width) {
+        if (vid.readyState >= 2 && this.mirror.width && this.mirrorFrame !== this.tracker.frameId) {
+          this.mirrorFrame = this.tracker.frameId;
           this.mctx.setTransform(-1, 0, 0, 1, this.mirror.width, 0);
           this.mctx.drawImage(vid, 0, 0);
         }
@@ -1280,7 +1309,7 @@
     _drawHands(g, inp, color) {
       inp.hands.forEach((hnd, k) => {
         if (!hnd.visible) return;
-        const r = Math.max(18, (inp.shW || 80) * 0.24);
+        const r = clamp((inp.shW || 80) * 0.15, 15, 30);
         handIcon(g, hnd.x, hnd.y, r, color, 0, k === 1);
       });
     }
@@ -1424,7 +1453,7 @@
           c.y = p.y;
           c.seen = true;
         }
-        const k = Math.min(1, dt * 14);
+        const k = 1 - Math.exp(-dt * 30);
         c.x += (p.x - c.x) * k;
         c.y += (p.y - c.y) * k;
         c.el.style.display = "block";
@@ -4822,6 +4851,8 @@
   var state = {
     players: store.get("ho-players", 1),
     difficulty: store.get("ho-diff", "orta"),
+    input: store.get("ho-input", "camera"),
+    // 'camera' | 'mouse': oyunlar hangi kontrolle açılır
     tracker: null,
     cameraBusy: false,
     session: null,
@@ -4895,6 +4926,7 @@
     if (state.tracker && state.tracker.running && state.tracker.landmarker) return true;
     if (state.cameraBusy) return false;
     state.cameraBusy = true;
+    updateCamButtons();
     const setStatus = (s) => {
       if (statusEl) statusEl.textContent = s;
     };
@@ -4925,7 +4957,13 @@
     $("#startCam").textContent = on ? "\u23F9 Kameray\u0131 kapat" : "\u{1F4F7} Kameray\u0131 a\xE7";
     $("#startCam").classList.toggle("on-cam", on);
     $("#startCam").classList.toggle("green", !on);
-    $("#camBtn").classList.toggle("on", on);
+    const mb = $("#camBtn");
+    const mouse = state.input === "mouse";
+    mb.classList.toggle("mouse", mouse);
+    mb.classList.toggle("live", !mouse && on && !state.cameraBusy);
+    mb.classList.toggle("busy", !mouse && state.cameraBusy);
+    mb.title = mouse ? "Fare modu: kameraya ge\xE7mek i\xE7in bas" : on ? "Kamera modu: fareye ge\xE7mek i\xE7in bas" : "Kamera modu (kapal\u0131): a\xE7mak i\xE7in bas";
+    $("#mouseMode").classList.toggle("on-mouse", mouse);
     $("#marqueeText").textContent = on ? "\u270B Elini kald\u0131r, bir kart\u0131n \xFCst\xFCnde tut, daire dolunca oyun a\xE7\u0131l\u0131r! \u2B50" : "\u2728 \u{1F4F7} Kameray\u0131 a\xE7, sonra her \u015Feyi ellerinle y\xF6net! \u2B50";
   }
   function camErrorText(e) {
@@ -4934,7 +4972,12 @@
     if (e && e.name === "NotReadableError") return "Kamera ba\u015Fka bir uygulama taraf\u0131ndan kullan\u0131l\u0131yor olabilir. Onu kapat\u0131p tekrar dene.";
     return "Kamera ya da hareket alg\u0131lay\u0131c\u0131 ba\u015Flat\u0131lamad\u0131. \u0130nternet ba\u011Flant\u0131n\u0131 kontrol et ve tekrar dene.";
   }
-  function openGame(id, mouse = false) {
+  function setInput(mode) {
+    state.input = mode;
+    store.set("ho-input", mode);
+    updateCamButtons();
+  }
+  function openGame(id, mouse = state.input === "mouse") {
     sfx.unlock();
     location.hash = `#/oyna/${id}/${mouse ? "fare" : state.players}`;
   }
@@ -5337,7 +5380,7 @@
     $("#home").hidden = false;
     document.body.classList.remove("playing");
     if ("speechSynthesis" in window) speechSynthesis.cancel();
-    if (state.tracker) state.tracker.setMode(2);
+    if (state.tracker) state.tracker.setMode(state.players);
   }
   var INFO = {
     gizlilik: `<h2>\u{1F512} Gizlilik</h2>
@@ -5389,6 +5432,7 @@
   }
   var lastT = performance.now();
   var chipT = 0;
+  var frameN = 0;
   function mainLoop(now) {
     const dt = Math.min(0.05, (now - lastT) / 1e3);
     lastT = now;
@@ -5399,7 +5443,8 @@
     const inGame = state.session && (state.session.phase === "count" || state.session.phase === "play");
     hands.enabled = !inGame;
     hands.update(tr, dt);
-    if (!playing) {
+    frameN++;
+    if (!playing && !(tr && tr.running && frameN % 2)) {
       thumbs.forEach(({ canvas, game }) => {
         const S = sizeCanvas(canvas);
         if (!S) return;
@@ -5437,6 +5482,7 @@
       store.set("ho-players", state.players);
       syncSegs();
       sfx.tap(state.players);
+      if (state.tracker && $("#play").hidden) state.tracker.setMode(state.players);
     }));
     document.querySelectorAll("[data-diff]").forEach((b) => b.addEventListener("click", () => {
       state.difficulty = b.dataset.diff;
@@ -5444,31 +5490,26 @@
       syncSegs();
       sfx.tap(2);
     }));
-    const camToggle = async () => {
+    const camOn = async () => {
       sfx.unlock();
-      if (state.tracker && state.tracker.running) return stopCamera();
+      setInput("camera");
       try {
         await ensureCamera($("#marqueeText"));
-        state.tracker.setMode(2);
+        state.tracker.setMode(state.players);
+        updateCamButtons();
         say("Elini kald\u0131r ve bir oyun se\xE7!");
       } catch (e) {
         $("#marqueeText").textContent = "\u{1F63F} " + camErrorText(e);
       }
     };
-    $("#startCam").addEventListener("click", camToggle);
-    $("#camBtn").addEventListener("click", camToggle);
-    $("#mouseMode").addEventListener("click", () => {
+    const mouseOn = () => {
+      stopCamera();
+      setInput("mouse");
       $("#marqueeText").textContent = "\u{1F5B1}\uFE0F Fare modu: bir oyunun \u25B6 OYNA d\xFC\u011Fmesine bas!";
-      state.mouseNext = true;
-      document.querySelectorAll(".play-btn").forEach((b) => b.classList.add("pulse"));
-    });
-    document.querySelectorAll(".play-btn").forEach((b, i) => b.addEventListener("click", (e) => {
-      if (state.mouseNext) {
-        e.stopImmediatePropagation();
-        state.mouseNext = false;
-        openGame(GAMES[i].id, true);
-      }
-    }, true));
+    };
+    $("#startCam").addEventListener("click", () => state.tracker && state.tracker.running ? stopCamera() : camOn());
+    $("#camBtn").addEventListener("click", () => state.input === "mouse" ? camOn() : mouseOn());
+    $("#mouseMode").addEventListener("click", mouseOn);
     $("#privacyPill").addEventListener("click", () => {
       location.hash = "#/gizlilik";
     });
@@ -5502,6 +5543,7 @@
       startPlay(game.id, String(players));
     });
     $("#mouseBtn").addEventListener("click", () => {
+      setInput("mouse");
       location.hash = `#/oyna/${state.current.game.id}/fare`;
     });
     $("#mirrorToggle").addEventListener("click", () => {

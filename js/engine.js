@@ -111,7 +111,8 @@ export class Session {
     this.inputs = [new InputState(), new InputState()];
     this.lastInputs = [];
     this.mirror = document.createElement('canvas');
-    this.mctx = this.mirror.getContext('2d');
+    this.mctx = this.mirror.getContext('2d', { alpha: false });
+    this.mirrorFrame = -1;
     this.running = false;
     this._bind();
     this.resize();
@@ -141,7 +142,8 @@ export class Session {
   }
 
   resize() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    // kamerada algılama da işlemciyi kullanıyor: retina ekranda 2x yerine 1.5x çizim, gözle fark edilmez ama ~%45 daha az piksel
+    const dpr = Math.min(this.tracker ? 1.5 : 2, window.devicePixelRatio || 1);
     const W = this.canvas.clientWidth || 800, H = this.canvas.clientHeight || 600;
     this.canvas.width = Math.round(W * dpr);
     this.canvas.height = Math.round(H * dpr);
@@ -234,7 +236,9 @@ export class Session {
       this.tracker.detect(now);
       const vid = this.tracker.video;
       if (vid.videoWidth && this.mirror.width !== vid.videoWidth) { this.mirror.width = vid.videoWidth; this.mirror.height = vid.videoHeight; }
-      if (vid.readyState >= 2 && this.mirror.width) {
+      // kamera karesi yalnızca yeni kare geldiğinde kopyalanır (ekran 60, kamera 30 kare/sn)
+      if (vid.readyState >= 2 && this.mirror.width && this.mirrorFrame !== this.tracker.frameId) {
+        this.mirrorFrame = this.tracker.frameId;
         this.mctx.setTransform(-1, 0, 0, 1, this.mirror.width, 0);
         this.mctx.drawImage(vid, 0, 0);
       }
@@ -325,7 +329,7 @@ export class Session {
   _drawHands(g, inp, color) {
     inp.hands.forEach((hnd, k) => {
       if (!hnd.visible) return;
-      const r = Math.max(18, (inp.shW || 80) * 0.24);
+      const r = clamp((inp.shW || 80) * 0.15, 15, 30);
       handIcon(g, hnd.x, hnd.y, r, color, 0, k === 1);
     });
   }

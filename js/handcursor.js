@@ -61,7 +61,8 @@ export class HandCursors {
         continue;
       }
       if (!c.seen) { c.x = p.x; c.y = p.y; c.seen = true; }
-      const k = Math.min(1, dt * 14);
+      // pozlar pose.js'te zaten yumuşatılıyor; burada yalnızca hafif bir takip
+      const k = 1 - Math.exp(-dt * 30);
       c.x += (p.x - c.x) * k;
       c.y += (p.y - c.y) * k;
       c.el.style.display = 'block';

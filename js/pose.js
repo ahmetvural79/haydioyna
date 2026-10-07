@@ -13,11 +13,14 @@ export class PoseTracker {
     this.video.muted = true;
     this.stream = null;
     this.landmarker = null;
-    this.numPoses = 2;
-    this.mode = 1; // oyuncu sayısı: atama buna göre yapılır
+    this.mode = 1; // oyuncu sayısı: atama ve aranan kişi sayısı buna göre
     this.lastVideoTime = -1;
+    this.frameId = 0; // her yeni algılanan kamera karesinde artar
     this.poses = []; // her biri 33 nokta: {x,y,v} aynalanmış (0..1)
-    this.slots = [null, null]; // oyuncu sıralarına atanmış ve yumuşatılmış pozlar
+    this.targets = [null, null]; // son algılanan ham pozlar
+    this.slots = [null, null]; // oyuncu sıralarına atanmış, kareler arası akıcı izlenen pozlar
+    this._lastNow = 0;
+    this._optsBusy = null;
     this.lastSeen = [0, 0];
     this.fps = 0;
     this._fpsT = 0; this._fpsN = 0;
@@ -25,7 +28,8 @@ export class PoseTracker {
 
   async startCamera() {
     this.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      // model girişi zaten 256 px; büyük kare yalnızca GPU'ya kopyalamayı yavaşlatır
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } },
       audio: false,
     });
     this.video.srcObject = this.stream;
@@ -37,7 +41,7 @@ export class PoseTracker {
   }
 
   async loadModel(onStatus = () => {}) {
-    const numPoses = this.numPoses;
+    const numPoses = this.mode === 1 ? 1 : 2;
     onStatus('Hareket algılayıcı indiriliyor…');
     const vision = await import(VISION_URL);
     const fileset = await vision.FilesetResolver.forVisionTasks(WASM_URL);
@@ -58,17 +62,41 @@ export class PoseTracker {
     onStatus('Hazır!');
   }
 
-  // Her karede çağrılır; yeni kamera karesi varsa algılar
+  // Her ekran karesinde çağrılır: yeni kamera karesi varsa algılar, sonra pozları akıcı biçimde hedefe taşır
   detect(now) {
-    if (!this.landmarker || this.video.readyState < 2) return;
-    if (this.video.currentTime === this.lastVideoTime) return;
-    this.lastVideoTime = this.video.currentTime;
-    let res;
-    try { res = this.landmarker.detectForVideo(this.video, now); } catch (e) { console.warn(e); return; }
-    this.poses = (res.landmarks || []).map((lm) => lm.map((p) => ({ x: 1 - p.x, y: p.y, v: p.visibility ?? 1 })));
-    this._assign(now);
-    this._fpsN++;
-    if (now - this._fpsT > 1000) { this.fps = this._fpsN; this._fpsN = 0; this._fpsT = now; }
+    const dt = this._lastNow ? Math.min(0.1, (now - this._lastNow) / 1000) : 0.016;
+    if (now === this._lastNow) return; // aynı karede ikinci çağrı
+    this._lastNow = now;
+    if (this.landmarker && !this._optsBusy && this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime) {
+      this.lastVideoTime = this.video.currentTime;
+      let res = null;
+      try { res = this.landmarker.detectForVideo(this.video, now); } catch (e) { console.warn(e); }
+      if (res) {
+        this.poses = (res.landmarks || []).map((lm) => lm.map((p) => ({ x: 1 - p.x, y: p.y, v: p.visibility ?? 1 })));
+        this._assign(now);
+        this.frameId++;
+        this._fpsN++;
+        if (now - this._fpsT > 1000) { this.fps = this._fpsN; this._fpsN = 0; this._fpsT = now; }
+      }
+    }
+    this._follow(dt);
+  }
+
+  // Kamera ~30 kare/sn, ekran 60+ kare/sn: aradaki karelerde noktaları hedefe kaydırarak titremesiz ve
+  // kesiksiz hareket. Küçük oynamalar (gürültü) yavaş, hızlı el hareketleri neredeyse anında izlenir.
+  _follow(dt) {
+    for (let i = 0; i < 2; i++) {
+      const t = this.targets[i], s = this.slots[i];
+      if (!t) { this.slots[i] = null; continue; }
+      if (!s) { this.slots[i] = t.map((p) => ({ ...p })); continue; }
+      for (let j = 0; j < t.length; j++) {
+        const a = s[j], b = t[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const rate = Math.min(60, 14 + Math.hypot(dx, dy) * 900);
+        const k = 1 - Math.exp(-dt * rate);
+        a.x += dx * k; a.y += dy * k; a.v = b.v;
+      }
+    }
   }
 
   _assign(now) {
@@ -89,25 +117,23 @@ export class PoseTracker {
       else if (sorted.length === 1) targets[center(sorted[0]) < 0.5 ? 0 : 1] = sorted[0];
     }
     for (let i = 0; i < 2; i++) {
-      const t = targets[i];
-      if (!t) {
-        if (now - this.lastSeen[i] > 400) this.slots[i] = null;
-        continue;
-      }
-      this.lastSeen[i] = now;
-      const prev = this.slots[i];
-      if (!prev) { this.slots[i] = t.map((p) => ({ ...p })); continue; }
-      const k = 0.55; // yumuşatma
-      this.slots[i] = t.map((p, j) => ({
-        x: prev[j].x + (p.x - prev[j].x) * k,
-        y: prev[j].y + (p.y - prev[j].y) * k,
-        v: p.v,
-      }));
+      if (targets[i]) { this.lastSeen[i] = now; this.targets[i] = targets[i]; }
+      else if (now - this.lastSeen[i] > 400) this.targets[i] = null;
     }
   }
 
   setMode(m) {
-    if (this.mode !== m) { this.mode = m; this.slots = [null, null]; }
+    if (this.mode === m) return;
+    this.mode = m;
+    this.targets = [null, null];
+    this.slots = [null, null];
+    // tek kişide yalnızca 1 kişi aramak algılamayı belirgin hızlandırır
+    if (this.landmarker && this.landmarker.setOptions) {
+      const lm = this.landmarker;
+      const p = (this._optsBusy = lm.setOptions({ numPoses: m === 1 ? 1 : 2 })
+        .catch((e) => console.warn(e))
+        .finally(() => { if (this._optsBusy === p) this._optsBusy = null; }));
+    }
   }
 
   get running() { return !!this.stream; }
